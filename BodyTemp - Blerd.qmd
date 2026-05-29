@@ -1,0 +1,475 @@
+---
+title: "BodyTemp-Blerd"
+author: "BDH"
+format: html
+editor: visual
+---
+
+# Data Set Up
+
+```{r}
+
+# 1.  
+library(tidyverse)
+library(car)
+library(gt)
+library(modelsummary)
+library(emmeans)
+library(modelbased)
+library(multcomp)
+library(ggpubr)
+library(cowplot)
+library(lme4)
+library(lmerTest)
+library(outliers)
+library(DHARMa)
+library(statmod)
+library(readr)
+library(dplyr)
+
+# 2. 
+setwd("/Users/ben/Desktop/Blerd/Data Analysis")
+
+# 3. Load your data
+datum = read.csv("Blerd.csv")
+
+# 4. Ensure categorical variables are properly set
+datum$SexF = as.factor (datum$Sex)
+datum$TreatmentF = as.factor(datum$Treatment)
+datum$TimeF = as.factor(datum$Time)
+datum$IncubatorF = as.factor (datum$Incubator)
+datum$SideF = as.factor (datum$Side)
+datum$PostGlucose = as.numeric (datum$PostGlucose)
+datum$PostKetones = as.numeric (datum$PostKetones)
+datum$PostDamage = as.numeric (datum$PostDamage)
+datum$PostCORT = as.numeric (datum$PostCORT)
+datum$AvgFinalTemp = as.numeric (datum$AvgFinalTemp)
+datum$AvgMaxTemp = as.numeric (datum$AvgMaxTemp)
+
+# 5. Subset data so there are no dead individuals included
+datum1 = datum %>%
+  filter(!Died %in% c("Died", "PIT.Death"))
+
+# 6. Take out any of the blank cells that cause problems when graphing
+datum2 = datum1 %>%
+  filter(PostDamage != "", AvgMaxTemp != "")
+
+```
+
+# Initial Data Viz
+
+```{r}
+
+# 1. Correlation between the individuals that have both the final 30 min and the top 10% of body temperature values
+ggplot(datum2, aes(x = AvgFinalTemp, y = AvgMaxTemp, color = TreatmentF)) +
+  geom_point() +
+  theme_classic()
+
+# 2. Correlation between the average top 10% of body temperature values and post glucose
+ggplot(datum2, aes(x = PostGlucose, y = AvgMaxTemp, color = TreatmentF)) +
+  geom_point() +
+  theme_classic()
+
+
+# 3. Correlation between the average top 10% of body temperature values and post glucocorticoids
+ggplot(datum2, aes(x = PostCORT, y = AvgMaxTemp, color = TreatmentF)) +
+  geom_point() +
+  theme_classic()
+
+# 4. Correlation between the average top 10% of body temperature values and post DNA damage
+ggplot(datum2, aes(x = PostDamage, y = AvgMaxTemp, color = TreatmentF)) +
+  geom_point() +
+  theme_classic()
+
+# 5. The average top 10% of body temperature values and relationship to treatment and sex
+ggplot(datum2, aes(x = SexF, y= AvgMaxTemp, color = TreatmentF)) +
+  geom_point(
+    position = position_jitterdodge(
+      jitter.width = 0.2, 
+      dodge.width = 0.5 
+    )
+  ) +
+  theme_classic()
+```
+
+# Analysis - Correlation between maximum temperature and final 30 minutes temperature
+
+```{r}
+
+# Run Pearson's Correlation Test
+pearson_result = cor.test(
+  x = datum2$AvgFinalTemp,    # Your first continuous variable
+  y = datum2$AvgMaxTemp,    # Your second continuous variable
+  method = "pearson"   # Specify the Pearson method
+)
+
+# View the results
+print(pearson_result)
+```
+
+**Conclusion:** Yay – they are correlated! I took this to mean I can use the ‘average maximum body temperature variable’ to correlate to other variables (Glucose, Damage, ect). This way we can include more body temperature data points.
+
+# Analysis - Treatment and sex impact on body temperature
+
+```{r}
+#Running the models
+
+#  1. Start with global linear mixed effects model to assess what impacts body temperature 
+results = lm(AvgMaxTemp ~ TreatmentF * SexF, data = datum2, na.action = na.omit)
+summary(results)
+Anova(results, type = "III")
+
+# 2. The two way interaction was not significant, so it was removed from the model
+results2 = lm(AvgMaxTemp ~ TreatmentF + SexF, data = datum2, na.action = na.omit)
+summary(results2)
+Anova(results2, type = "III")
+
+#Use AIC to test which one of these models has the best fit
+AIC(results, results2)
+
+
+#This is the final model, use 'results2' for testing the assumptions.
+results_final = lm(AvgMaxTemp ~ TreatmentF + SexF, data = datum2, na.action = na.omit)
+summary(results_final)
+Anova(results_final, type = "III")
+
+```
+
+```{r}
+#Assumptions of the model
+
+# 1. Check assumptions of a linear model
+
+# --- Extract Residuals and Fitted Values ---
+#1. Extract the data frame used by the model
+datum_clean <- model.frame(results_final)
+
+# 2. Calculate and assign the fitted and residual values to this clean data frame
+datum_clean$fitted <- fitted(results_final)
+datum_clean$raw_resid <- residuals(results_final)
+datum_clean$std_resid <- datum_clean$raw_resid / sd(datum_clean$raw_resid, na.rm = TRUE)
+
+# 3. Use the studentized residuals method from the 'lme4' utility functions
+# Although 'rstandard' doesn't work, 'residuals' is robust.
+# If you really need a standardized residual, use this function:
+datum_clean$std_resid <- datum_clean$raw_resid / sd(datum_clean$raw_resid, na.rm = TRUE)
+
+
+# --- 2. Create the Plots ---
+
+# A. Linearity and Homoscedasticity Plot (Residuals vs. Fitted)
+ggplot(datum_clean, aes(x = fitted, y = std_resid)) +
+  geom_point(alpha = 0.6) +
+  # Add the ideal reference line at y=0
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  # Add a LOESS smoothing line (red line in performance)
+  geom_smooth(method = "loess", se = FALSE, color = "blue", linewidth = 0.5) + 
+  labs(
+    title = "Linearity Check: Standardized Residuals vs. Fitted Values",
+    x = "Fitted Values",
+    y = "Standardized Residuals"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10))
+
+# B. Normality Check (Quantile-Quantile Plot)
+ggplot(datum_clean, aes(sample = std_resid)) +
+  # Create the Q-Q plot
+  stat_qq() + 
+  # Add the reference line (the ideal normal distribution line)
+  stat_qq_line(color = "red") + 
+  labs(
+    title = "Normality Check: Q-Q Plot of Standardized Residuals",
+    x = "Theoretical Quantiles",
+    y = "Standardized Residuals"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10))
+
+# C. Scale-Location Plot (Homogeneity of Variance Check)
+# This uses the square root of the absolute standardized residuals
+ggplot(datum_clean, aes(x = fitted, y = sqrt(abs(std_resid)))) +
+  geom_point(alpha = 0.6) +
+  # Add the ideal flat reference line
+  geom_smooth(method = "loess", se = FALSE, color = "blue", linewidth = 0.5) + 
+  labs(
+    title = "Homogeneity of Variance Check: Scale-Location Plot",
+    x = "Fitted Values",
+    y = expression(sqrt(abs("Standardized Residuals")))
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10))
+
+#D. Histogram of residuals
+# Calculate mean and standard deviation of residuals for the density curve
+resid_mean <- mean(datum_clean$std_resid, na.rm = TRUE)
+resid_sd <- sd(datum_clean$std_resid, na.rm = TRUE)
+
+ggplot(datum_clean, aes(x = std_resid)) +
+  # 1. Create the Histogram (using density scale)
+  geom_histogram(aes(y = after_stat(density)), 
+                 bins = 15, # Adjust bin count for best visualization
+                 color = "black", 
+                 fill = "lightblue") +
+  
+  # 2. Overlay the Density of the Residuals (Green Line)
+  geom_density(color = "darkgreen", linewidth = 1) +
+  
+  # 3. Overlay the Theoretical Normal Density Curve (Red Dashed Line)
+  stat_function(fun = dnorm, 
+                args = list(mean = resid_mean, sd = resid_sd), 
+                color = "red", 
+                linewidth = 1,
+                linetype = "dashed") +
+  
+  labs(
+    title = "Residual Normality Check: Histogram with Density Curve",
+    x = "Standardized Residuals (Z-Scores)",
+    y = "Density"
+  ) +
+  theme_minimal()
+```
+
+**Conclusions:** Based on the residuals from the model, I think the assumptions are met and we can continue with analysis using this model.
+
+**Next steps**: No further steps
+
+# Manuscript Graph
+
+```{r}
+# 1. Add the means and 95% CIs to the dataframe for the variables we are interested in 
+
+datum2_with_summary = datum2 %>%
+  
+  # 1. Group the data by the interaction terms
+  group_by(TreatmentF) %>%
+  
+  # 2. Calculate the group-level statistics (Mean, CI, etc.)
+  mutate(
+    N_group = n(),   
+    Mean_Temp = mean(AvgMaxTemp, na.rm = TRUE),
+    SD_Temp = sd(AvgMaxTemp, na.rm = TRUE),
+    SE_Temp = SD_Temp / sqrt(N_group),
+    CI_Temp = 1.96 * SE_Temp,
+    CI_Upper_Group = Mean_Temp + CI_Temp,
+    CI_Lower_Group = Mean_Temp - CI_Temp
+  ) %>%
+  ungroup()
+  #View the dataframe that was created 
+head(datum2_with_summary)
+
+
+# 2. Cleaning up data frame before plotting
+  # Define the consistent dodge width and rename the data frame for plotting
+plot_data = datum2_with_summary 
+
+  #Order the time points so that Pre and Post are graphed in the correct order on the plot
+plot_data$TreatmentF = as.factor(plot_data$TreatmentF)
+
+# 3. Plotting the graph
+
+plot = ggplot(data = plot_data, aes(x = TreatmentF, y = AvgMaxTemp, color = TreatmentF)) + 
+  geom_jitter(
+    size = 3.5,
+    alpha = 0.5,
+    position = position_jitter(width = 0.2) 
+  ) +
+  
+  geom_point(
+    aes(y = Mean_Temp, group = TreatmentF),
+    size = 7.5, 
+    stroke = 1,
+    color = "black" 
+  ) +
+  
+  geom_errorbar(
+    aes(ymin = CI_Lower_Group, ymax = CI_Upper_Group, group = TreatmentF),
+    width = 0.2,
+    linewidth = 1,
+    color = "black",
+  ) +
+
+  geom_line(
+    aes(y = Mean_Temp, group = TreatmentF),
+    linewidth = 1.5,
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "Control" = "#AAB8C2",         
+      "Heat" = "firebrick4"     
+    )
+  ) +
+  
+  labs(
+    x = "Treatment",
+    y = "Body Temperature (°C)",
+    color = "Treatment Group"
+  ) +  
+  theme_classic() +
+  
+theme(
+  axis.title = element_text(face = "bold", size = 30),
+  axis.text = element_text(size = 25),
+  strip.text = element_text(size = 20),
+  panel.background = element_rect(fill = "transparent", color = NA), 
+  plot.background = element_rect(fill = "transparent", color = NA),
+  axis.line = element_line(linewidth = 1.5, colour = "black"),
+  legend.position = "none"
+)
+
+
+# 4. Adding signifigance and sample size
+
+plot1 =  plot +
+  annotate(
+    "text", 
+    x = c(1, 2), 
+    y = c(46.6, 47.8), 
+    label = c("a", "b"),  
+    size = 12,
+    color = "black") +
+   
+   # Add a new layer for the sample sizes
+  annotate(
+    "text",
+    x = c(1, 2), 
+    y = c(45.6, 46.8), 
+    # Add your sample sizes here
+    label = c("(26)", "(27)"), 
+    size = 10, # Make the font size slightly smaller
+    color = "black")
+
+# 5. Save the graph
+ggsave(
+  filename = "TempPlot.png", 
+  plot = plot1,                       
+  width = 6.49,                              
+  height = 6.49,  
+  units = "in",
+  dpi = 500,
+  bg = "transparent"
+)
+```
+
+# Manuscript Graph - With sex
+
+```{r}
+#Manuscript Graph with Sex
+
+# 1. Add the means and 95% CIs to the dataframe for the variables we are interested in 
+
+datum2_with_summary = datum2 %>%
+  
+  # 1. Group the data by the interaction terms
+  group_by(TreatmentF) %>%
+  
+  # 2. Calculate the group-level statistics (Mean, CI, etc.)
+  mutate(
+    N_group = n(),   
+    Mean_Temp = mean(AvgMaxTemp, na.rm = TRUE),
+    SD_Temp = sd(AvgMaxTemp, na.rm = TRUE),
+    SE_Temp = SD_Temp / sqrt(N_group),
+    CI_Temp = 1.96 * SE_Temp,
+    CI_Upper_Group = Mean_Temp + CI_Temp,
+    CI_Lower_Group = Mean_Temp - CI_Temp
+  ) %>%
+  ungroup()
+  #View the dataframe that was created 
+head(datum2_with_summary)
+
+
+# 2. Cleaning up data frame before plotting
+  # Define the consistent dodge width and rename the data frame for plotting
+plot_data = datum2_with_summary 
+
+  #Order the time points so that Pre and Post are graphed in the correct order on the plot
+plot_data$TreatmentF = as.factor(plot_data$TreatmentF)
+
+# 3. Plotting the graph
+
+plot = ggplot(data = plot_data, aes(x = TreatmentF, y = AvgMaxTemp, color = TreatmentF)) + 
+  geom_jitter(
+    aes(shape = SexF),
+    size = 3.5,
+    alpha = 0.5,
+    position = position_jitter(width = 0.2) 
+  ) +
+  
+  geom_point(
+    aes(y = Mean_Temp, group = TreatmentF),
+    shape = 18,
+    size = 7.5, 
+    stroke = 1,
+    color = "black" 
+  ) +
+  
+  geom_errorbar(
+    aes(ymin = CI_Lower_Group, ymax = CI_Upper_Group, group = TreatmentF),
+    width = 0.2,
+    linewidth = 1,
+    color = "black",
+  ) +
+
+  geom_line(
+    aes(y = Mean_Temp, group = TreatmentF),
+    linewidth = 1.5,
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "Control" = "#AAB8C2",         
+      "Heat" = "firebrick4"     
+    )
+  ) +
+  
+  labs(
+    x = "Treatment",
+    y = "Body Temperature (°C)",
+    color = "Treatment Group"
+  ) +  
+  theme_classic() +
+  
+theme(
+  axis.title = element_text(face = "bold", size = 30),
+  axis.text = element_text(size = 25),
+  strip.text = element_text(size = 20),
+  panel.background = element_rect(fill = "transparent", color = NA), 
+  plot.background = element_rect(fill = "transparent", color = NA),
+  axis.line = element_line(linewidth = 1.5, colour = "black"),
+  legend.position = "none"
+)
+
+
+# 4. Adding signifigance and sample size
+
+plot1 =  plot +
+  annotate(
+    "text", 
+    x = c(1, 2), 
+    y = c(46.6, 47.8), 
+    label = c("a", "b"),  
+    size = 12,
+    color = "black") +
+   
+   # Add a new layer for the sample sizes
+  annotate(
+    "text",
+    x = c(1, 2), 
+    y = c(45.6, 46.8), 
+    # Add your sample sizes here
+    label = c("(26)", "(27)"), 
+    size = 10, # Make the font size slightly smaller
+    color = "black")
+
+# 5. Save the graph
+ggsave(
+  filename = "TempPlotSex.png", 
+  plot = plot1,                       
+  width = 6.49,                              
+  height = 6.49,  
+  units = "in",
+  dpi = 500,
+  bg = "transparent"
+)
+```

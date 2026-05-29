@@ -1,0 +1,243 @@
+---
+title: "Network Analysis - Blerd"
+author: "BDH"
+format: html
+editor: visual
+---
+
+## Data Set Up
+
+```{r}
+
+# 1.  
+library(tidyverse)
+library(qgraph)
+library(bootnet)
+library(NetworkComparisonTest)
+
+# 2. 
+setwd("/Users/ben/Desktop/Blerd/Data Analysis")
+
+# 3. Load your data
+datum = read.csv("Blerd.csv")
+datumlong = read.csv("BlerdData_long.csv")
+
+# 4. Ensure categorical variables are properly set
+datum$SexF = as.factor (datum$Sex)
+datum$TreatmentF = as.factor(datum$Treatment)
+datum$TimeF = as.factor(datum$Time)
+datum$IncubatorF = as.factor (datum$Incubator)
+datum$SideF = as.factor (datum$Side)
+datum$PostGlucose = as.numeric (datum$PostGlucose)
+datum$PreGlucose = as.numeric (datum$PreGlucose)
+datum$PostKetones = as.numeric (datum$PostKetones)
+datum$PreKetones = as.numeric (datum$PreKetones)
+datum$PostDamage = as.numeric (datum$PostDamage)
+datum$PreDamage = as.numeric (datum$PreDamage)
+datum$PostCORT = as.numeric (datum$PostCORT)
+datum$PreCORT = as.numeric (datum$PreCORT)
+datum$AccMass = as.numeric (datum$AccMass)
+datum$AvgMaxTemp = as.numeric (datum$AvgMaxTemp)
+
+# 5. Subset data so there are no dead individuals included
+datum1 = datum %>%
+  filter(!Died %in% c("Died", "PIT.Death"))
+
+# 6. Take out any of the blank cells that cause problems when graphing
+datum2 = datum1 %>%
+filter(PostGlucose != "", PostGlucose != "Dead", 
+         AvgMaxTemp != "", AvgMaxTemp != "Dead",
+         PostKetones != "", PostKetones != "Dead", 
+         PostDamage != "", PostDamage != "Dead",
+         PostCORT != "", PostCORT != "Dead")
+datum2$TreatmentF = as.factor(datum2$Treatment)
+
+datum_final = datum2
+
+
+```
+
+# Correlation Matrix
+
+```{r}
+# Define your variables
+cor_vars = c("PostKetones", "PostGlucose", "PostCORT", "PostDamage", "AccMass", 
+             "AvgMaxTemp")
+
+# Calculate correlation matrix
+# 'use = "pairwise.complete.obs"' handles any missing values (NAs) row-by-row
+cor_matrix <- cor(datum2[, cor_vars], use = "pairwise.complete.obs")
+
+# Print the result rounded to 2 decimal places
+round(cor_matrix, 2)
+```
+
+# Network Correlation Analysis - Treatment Effects
+
+```{r}
+# 1. Define variables that are wanted for network analysis
+cor_vars = c("AvgMaxTemp", "PostKetones", "PostGlucose", "PostCORT", "PostDamage")
+
+# 2. Estimate Networks
+net_control = estimateNetwork(
+  datum_final[datum_final$TreatmentF == "Control", cor_vars], 
+  default = "pcor", 
+  corMethod = "cor_auto"
+  )
+
+net_heat = estimateNetwork(
+  datum_final[datum_final$TreatmentF == "Heat", cor_vars],
+  default = "pcor", 
+  corMethod = "cor_auto"
+  )
+
+  #Example code: 
+    #estimateNetwork()
+      #What this means: estimateNetwork() is the command from the bootnet package, and it works with qgraph to make graphs
+    #datum_final[datum_final$TreatmentF == "Control", cor_vars]
+      #What this means: this is the data that we are interested in working with. In step 1 we named the variables that we are interested in and now we are pulling that from our "datum_final" ensuring that we are only working with control individuals
+    #default = "pcor",
+      #What this means: This identifies unique relationships between variables by controlling for the influence of all other variables in the system
+    #corMethod = "cor_auto"
+      #What this means: This identifies what kind of data we have (continous or categorical)
+
+# 3. Extract numbers for visualization
+  #Step 2 calculated all of the partial correlations using statistical models, now we want to visualize those correlations as edges and nodes
+weights_control = net_control$graph
+weights_heat = net_heat$graph
+weights_diff = weights_heat - weights_control
+
+# 4. Calculate the global strength
+  #Sum of all absolute edge weights (divided by 2 because the matrix is mirrored). The absolute value is very important! the negative values are just as important as the postitive ones
+strength_control = sum(abs(weights_control)) / 2
+strength_heat    = sum(abs(weights_heat)) / 2
+  #Print the results
+print(paste("Global Strength - Control:", round(strength_control, 3)))
+print(paste("Global Strength - Heat:", round(strength_heat, 3)))
+
+# 5. Run a Network Comparison Test. In short, this gives you a p-value to see if the control and heat networks are different
+nct_treatment = NCT(
+  datum_final[datum_final$TreatmentF == "Control", cor_vars], 
+  datum_final[datum_final$TreatmentF == "Heat", cor_vars], 
+  it = 1000,                 #Number of permutations
+  test.edges = TRUE,         #Tests if specific connections changed
+  test.centrality = TRUE    #Tests if specific nodes became more important
+)
+
+  #Print results
+summary(nct_treatment)
+  #p=0.086
+```
+
+# Network Correlation - Sex differences in heat
+
+```{r}
+# 1. Define variables that are wanted for network analysis
+cor_vars = c("AvgMaxTemp", "PostKetones", "PostGlucose", "PostCORT", "PostDamage")
+  #Create datasets for heated males and females 
+    #Male
+male_data_final = datum_final %>%
+  filter(TreatmentF == "Heat", SexF == "M") %>%
+  dplyr::select(all_of(cor_vars)) %>%
+  drop_na()
+    #Female
+female_data_final = datum_final %>%
+  filter(TreatmentF == "Heat", SexF == "F") %>%
+  dplyr::select(all_of(cor_vars)) %>%
+  drop_na()
+
+
+# 2. Estimate Networks
+net_heat_male = estimateNetwork(
+  datum_final[datum_final$TreatmentF == "Heat" & datum_final$SexF == "M", cor_vars], 
+  default = "cor", corMethod = "cor_auto"
+)
+net_heat_female = estimateNetwork(
+  datum_final[datum_final$TreatmentF == "Heat" & datum_final$SexF == "F", cor_vars], 
+  default = "cor", corMethod = "cor_auto"
+)
+  #NOTE: we have changed this to be just correlational, so this differs from the above code which was partial correlations
+
+# 3. Extract numbers for visualization
+  #Step 2 calculated all of the partial correlations using statistical models, now we want to visualize those correlations as edges and nodes
+weights_male = net_heat_male$graph
+weights_female = net_heat_female$graph
+
+# 4. Calculate the global strength
+  #Sum of all absolute edge weights (divided by 2 because the matrix is mirrored). The absolute value is very important! the negative values are just as important as the postitive ones
+strength_male = sum(abs(weights_male)) / 2
+strength_female = sum(abs(weights_female)) / 2
+  #Print the results
+print(paste("Global Strength - Male:", round(strength_male, 3)))
+print(paste("Global Strength - Female:", round(strength_female, 3)))
+
+# 5. Run a Network Comparison Test. In short, this gives you a p-value to see if the heated male and female networks are different
+nct_sex_diff = NCT(
+  datum_final[datum_final$TreatmentF == "Heat" & datum_final$SexF == "M", cor_vars], 
+  datum_final[datum_final$TreatmentF == "Heat" & datum_final$SexF == "F", cor_vars], 
+  it = 1000,         
+  estimator = function(x){ qgraph::cor_auto(x) }, #This line calculates just correlations
+  test.edges = TRUE,   
+  test.centrality = TRUE
+)
+
+# See the results
+summary(nct_sex_diff)
+  #Network Invariance p=0.18
+  #Global Strength Invariance p=0.24
+```
+
+# Manuscript Graph - Treatment Network
+
+```{r}
+
+# 1. Visualization Parameters 
+  #Create a fixed layout for the network graph. This locks the positions based on the Heat network. This ensures your circles and nodes stay exactly the same for all networks
+L = qgraph(weights_heat, DoNotPlot = TRUE)$layout
+  #Renaming the variables so they are more intitive for the reader
+my_node_labels = c("Body\nTemp", "Ketones", "Glucose", "CORT", "DNA\nDamage")
+  #We define a list of common arguments to ensure consistency across all three network panels (Control, Heat, and Difference).
+
+common_args = list(
+  layout = L,
+  labels = my_node_labels,
+  label.cex = 1,
+  label.font = 2,
+  edge.labels = TRUE,
+  edge.label.cex = 2.5,
+  edge.label.font = 2,
+  edge.label.color = "black",
+  edge.label.bg = "white",
+  edge.label.margin = 0.01,
+  posCol = "#084594",
+  negCol = "firebrick4",
+  vsize = 20,
+  curveAll = TRUE, 
+  curveDefault = 0.5, 
+  fade = TRUE, 
+  border.width = 1
+)
+
+# 2. Organizing the .PNG file. NOTE: in order for this code to run you have to run it all at once. Then it will save to your working directory
+  #title of file
+path = "Network_Treatment.png"
+  # Open a high-resolution PNG file (300 DPI) with width and height values
+png(path, width = 7200, height = 3000, res = 300, bg = "transparent")
+  #This creates a space at the top of the whole file so that there is room for titles
+par(mfrow = c(1, 3), oma = c(0, 0, 15, 0), mar = c(3, 3, 3, 3)) 
+
+# 3. Making the figure
+  #Panel A - Control Network
+do.call(qgraph, c(list(input = weights_control), common_args))
+mtext("A: Control Network", side = 3, line = 5, cex = 3, font = 2, outer = TRUE, adj = 0.025)
+  # Panel B - Heat Network
+do.call(qgraph, c(list(input = weights_heat), common_args))
+mtext("B: Heat Network", side = 3, line = 5, cex = 3, font = 2, outer = TRUE, adj = 0.415)
+  # Panel C - Difference Network
+do.call(qgraph, c(list(input = weights_diff), common_args))
+mtext("C: Difference Network", side = 3, line = 5, cex = 3, font = 2, outer = TRUE, adj = 0.85)
+  #This closes the PNG that we opened at the top of this chuck of code
+dev.off()
+system(paste("open", shQuote(path)))
+par(mfrow = c(1, 1))
+```

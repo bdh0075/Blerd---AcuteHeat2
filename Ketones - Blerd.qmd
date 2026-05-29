@@ -1,0 +1,1303 @@
+---
+title: "Ketones - Blerd"
+author: "BDH"
+format: html
+editor: visual
+---
+
+# Data Set Up
+
+```{r}
+# 1.  
+library(tidyverse)
+library(car)
+library(gt)
+library(modelsummary)
+library(emmeans)
+library(modelbased)
+library(multcomp)
+library(ggpubr)
+library(cowplot)
+library(lme4)
+library(lmerTest)
+library(outliers)
+library(DHARMa)
+library(statmod)
+library(readr)
+library(dplyr)
+library(EnvStats)
+library(performance)
+library(see)
+library(patchwork)
+
+# 2. 
+setwd("/Users/ben/Desktop/Blerd/Data Analysis")
+
+# 3. Load your data
+datum = read.csv("Blerd.csv")
+datumlong = read.csv("BlerdData_long.csv")
+
+# 4. Ensure categorical variables are properly set
+datum$SexF = as.factor (datum$Sex)
+datum$TreatmentF = as.factor(datum$Treatment)
+datum$TimeF = as.factor(datum$Time)
+datum$IncubatorF = as.factor (datum$Incubator)
+datum$SideF = as.factor (datum$Side)
+datum$PostKetones = as.numeric (datum$PostKetones)
+datum$PreKetones = as.numeric (datum$PreKetones)
+
+datumlong$SexF = as.factor (datumlong$Sex)
+datumlong$TreatmentF = as.factor(datumlong$Treatment)
+datumlong$TimepointF = as.factor(datumlong$Timepoint)
+datumlong$Ketones = as.numeric (datumlong$Ketones)
+datumlong$Glucose = as.numeric (datumlong$Glucose)
+# 5. Subset data so there are no dead individuals included
+datum1 = datum %>%
+  filter(!Died %in% c("Died", "PIT.Death"))
+
+datumlong1 = datumlong %>%
+  filter(!Died %in% c("Died", "PIT.Death"))
+datumlong1 = datumlong1[-47, ]
+
+# 6. Take out any of the blank cells that cause problems when graphing
+datum2 = datum1 %>%
+  filter(PostKetones != "", PostKetones != "Dead", AvgMaxTemp != "", AvgMaxTemp != "Dead")
+datum2$TreatmentF = as.factor(datum2$Treatment)
+
+datumlong2 = datumlong1 %>%
+  filter(Ketones != "", Ketones != "Dead", Damage != "", Damage != "Dead",)
+```
+
+# Initial Data Viz
+
+```{r}
+
+# 1. Ketones across timepoints and relationship to treatment and sex
+ggplot(datumlong2, aes(x = Timepoint, y = Ketones, color = SexF, shape = TreatmentF)) +
+  geom_point(
+    position = position_jitterdodge(
+      jitter.width = 0.2, 
+      dodge.width = 0.5 
+    )
+  ) +
+  theme_classic()
+
+# 2. Correlation between the average top 10% of body temperature values and post ketones
+ggplot(datum2, aes(y = PostKetones, x = AvgMaxTemp, color = TreatmentF)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) + 
+  theme_classic()
+
+```
+
+**Notes:** Looks as if there is one outlier in the post-heated females. May want to think about running an outlier test to see if that is the case.
+
+# Summary Stats
+
+```{r}
+table = datumlong2 %>%
+  group_by(TreatmentF, TimepointF, SexF) %>%
+  summarise(
+    meanKetone = mean(Ketones, na.rm = TRUE),
+    sdKetone = sd(Ketones, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  )
+
+print(table)
+```
+
+# Analysis - Ketones across time points
+
+We started under a linear mixed effects model framework to test for the effects of treatment (control or heated), sex (male or female), and time point (pre or post) on ketone levels. Because we have two samples for each individual, we included that as a random effect (1\|BirdID).
+
+```{r}
+
+#Running the models
+
+#  1. Start with global linear mixed effects model to assess ketone levels
+results = lmer(Ketones ~ TreatmentF * SexF * TimepointF + (1|ID),
+               data = datumlong2, na.action = na.omit)
+summary(results)
+Anova(results, type = "III")
+
+# 2. The three way interaction was not significant, so it was removed and all two way interactions are included
+results2 = lmer(Ketones ~ TreatmentF * SexF + TreatmentF * TimepointF +
+                  SexF * TimepointF + (1|ID), data = datumlong2, na.action = na.omit)
+summary(results2)
+Anova(results2, type = "III")
+
+# 3. The Treatment*Sex interaction was not significant, so it was removed from the model
+results3 = lmer(Ketones ~ SexF * TimepointF + TreatmentF * TimepointF +
+                  (1|ID), data = datumlong2, na.action = na.omit)
+summary(results3)
+Anova(results3, type = "III")
+
+#Use AIC to test which one of these models has the best fit
+AIC(results, results2, results3)
+
+
+#This is the global model, use 'results3' for testing the assumptions
+
+results_final = lmer(Ketones ~ SexF * TimepointF + TreatmentF * TimepointF +
+                  (1|ID), data = datumlong2, na.action = na.omit)
+summary(results_final)
+Anova(results_final, type = "III")
+
+```
+
+```{r}
+#Assumptions of the model
+
+
+# 1. Check the VIF of this model
+vif(results_final)
+  #VIF = 1: No multicollinearity
+  #VIF between 1 and 5: Generally considered acceptable or moderate multicollinearity
+  #VIF > 5 (or > 10): Indicates potentially high multicollinearity
+
+# 2. Check other assumptions of a linear model
+
+# --- Extract Residuals and Fitted Values ---
+#1. Extract the data frame used by the model
+datum_clean <- model.frame(results_final)
+
+# 2. Calculate and assign the fitted and residual values to this clean data frame
+datum_clean$fitted <- fitted(results_final)
+datum_clean$raw_resid <- residuals(results_final)
+datum_clean$std_resid <- datum_clean$raw_resid / sd(datum_clean$raw_resid, na.rm = TRUE)
+
+# 3. Use the studentized residuals method from the 'lme4' utility functions
+# Although 'rstandard' doesn't work, 'residuals' is robust.
+# If you really need a standardized residual, use this function:
+datum_clean$std_resid <- datum_clean$raw_resid / sd(datum_clean$raw_resid, na.rm = TRUE)
+
+
+# --- 2. Create the Plots ---
+
+# A. Linearity and Homoscedasticity Plot (Residuals vs. Fitted)
+ggplot(datum_clean, aes(x = fitted, y = std_resid)) +
+  geom_point(alpha = 0.6) +
+  # Add the ideal reference line at y=0
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  # Add a LOESS smoothing line (red line in performance)
+  geom_smooth(method = "loess", se = FALSE, color = "blue", linewidth = 0.5) + 
+  labs(
+    title = "Linearity Check: Standardized Residuals vs. Fitted Values",
+    x = "Fitted Values",
+    y = "Standardized Residuals"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10))
+
+# B. Normality Check (Quantile-Quantile Plot)
+ggplot(datum_clean, aes(sample = std_resid)) +
+  # Create the Q-Q plot
+  stat_qq() + 
+  # Add the reference line (the ideal normal distribution line)
+  stat_qq_line(color = "red") + 
+  labs(
+    title = "Normality Check: Q-Q Plot of Standardized Residuals",
+    x = "Theoretical Quantiles",
+    y = "Standardized Residuals"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10))
+
+# C. Scale-Location Plot (Homogeneity of Variance Check)
+# This uses the square root of the absolute standardized residuals
+ggplot(datum_clean, aes(x = fitted, y = sqrt(abs(std_resid)))) +
+  geom_point(alpha = 0.6) +
+  # Add the ideal flat reference line
+  geom_smooth(method = "loess", se = FALSE, color = "blue", linewidth = 0.5) + 
+  labs(
+    title = "Homogeneity of Variance Check: Scale-Location Plot",
+    x = "Fitted Values",
+    y = expression(sqrt(abs("Standardized Residuals")))
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10))
+
+#D. Histogram of residuals
+# Calculate mean and standard deviation of residuals for the density curve
+resid_mean <- mean(datum_clean$std_resid, na.rm = TRUE)
+resid_sd <- sd(datum_clean$std_resid, na.rm = TRUE)
+
+ggplot(datum_clean, aes(x = std_resid)) +
+  # 1. Create the Histogram (using density scale)
+  geom_histogram(aes(y = after_stat(density)), 
+                 bins = 15, # Adjust bin count for best visualization
+                 color = "black", 
+                 fill = "lightblue") +
+  
+  # 2. Overlay the Density of the Residuals (Green Line)
+  geom_density(color = "darkgreen", linewidth = 1) +
+  
+  # 3. Overlay the Theoretical Normal Density Curve (Red Dashed Line)
+  stat_function(fun = dnorm, 
+                args = list(mean = resid_mean, sd = resid_sd), 
+                color = "red", 
+                linewidth = 1,
+                linetype = "dashed") +
+  
+  labs(
+    title = "Residual Normality Check: Histogram with Density Curve",
+    x = "Standardized Residuals (Z-Scores)",
+    y = "Density"
+  ) +
+  theme_minimal()
+```
+
+**Conclusion**: Overall, the residuals do not look bad. It does look like there is one outlier, so there are many ways to proceed.
+
+**Next Steps**: Remove the outlier and see how that changes the results.
+
+```{r}
+#Removing the outlier
+  #Since it only looks like there is one outlier, I decided to run the Grubbs test, which is good for single outliers
+grubbs.test(datumlong2$Ketones)
+  #Making the new data frame
+datumlong2 = datumlong2[-149, ]
+
+#Running the models
+#  1. Start with global linear mixed effects model to assess ketone levels
+results = lmer(Ketones ~ TreatmentF * SexF * TimepointF + (1|ID),
+               data = datumlong2, na.action = na.omit)
+summary(results)
+Anova(results, type = "III")
+
+# 2. The three way interaction was not significant, so it was removed and all two way interactions are included
+results2 = lmer(Ketones ~ TreatmentF * SexF + TreatmentF * TimepointF +
+                  SexF * TimepointF + (1|ID), data = datumlong2, na.action = na.omit)
+summary(results2)
+Anova(results2, type = "III")
+
+# 3. The Treatment*Sex interaction was not significant, so it was removed from the model
+results3 = lmer(Ketones ~ SexF * TimepointF + TreatmentF * TimepointF +
+                  (1|ID), data = datumlong2, na.action = na.omit)
+summary(results3)
+Anova(results3, type = "III")
+
+#Use AIC to test which one of these models has the best fit
+AIC(results, results2, results3)
+
+
+#This is the global model, use 'results3' for testing the assumptions
+
+results3 = lmer(Ketones ~ SexF * TimepointF + TreatmentF * TimepointF +
+                  (1|ID), data = datumlong2, na.action = na.omit)
+summary(results3)
+Anova(results3, type = "III")
+```
+
+```{r}
+#Assumptions of the model
+
+
+# 1. Check the VIF of this model
+vif(results3)
+  #VIF = 1: No multicollinearity
+  #VIF between 1 and 5: Generally considered acceptable or moderate multicollinearity
+  #VIF > 5 (or > 10): Indicates potentially high multicollinearity
+
+# 2. Check other assumptions of a linear model
+
+# --- Extract Residuals and Fitted Values ---
+#1. Extract the data frame used by the model
+datum_clean <- model.frame(results3)
+
+# 2. Calculate and assign the fitted and residual values to this clean data frame
+datum_clean$fitted <- fitted(results3)
+datum_clean$raw_resid <- residuals(results3)
+datum_clean$std_resid <- datum_clean$raw_resid / sd(datum_clean$raw_resid, na.rm = TRUE)
+
+# 3. Use the studentized residuals method from the 'lme4' utility functions
+# Although 'rstandard' doesn't work, 'residuals' is robust.
+# If you really need a standardized residual, use this function:
+datum_clean$std_resid <- datum_clean$raw_resid / sd(datum_clean$raw_resid, na.rm = TRUE)
+
+
+# --- 2. Create the Plots ---
+
+# A. Linearity and Homoscedasticity Plot (Residuals vs. Fitted)
+ggplot(datum_clean, aes(x = fitted, y = std_resid)) +
+  geom_point(alpha = 0.6) +
+  # Add the ideal reference line at y=0
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  # Add a LOESS smoothing line (red line in performance)
+  geom_smooth(method = "loess", se = FALSE, color = "blue", linewidth = 0.5) + 
+  labs(
+    title = "Linearity Check: Standardized Residuals vs. Fitted Values",
+    x = "Fitted Values",
+    y = "Standardized Residuals"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10))
+
+# B. Normality Check (Quantile-Quantile Plot)
+ggplot(datum_clean, aes(sample = std_resid)) +
+  # Create the Q-Q plot
+  stat_qq() + 
+  # Add the reference line (the ideal normal distribution line)
+  stat_qq_line(color = "red") + 
+  labs(
+    title = "Normality Check: Q-Q Plot of Standardized Residuals",
+    x = "Theoretical Quantiles",
+    y = "Standardized Residuals"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10))
+
+# C. Scale-Location Plot (Homogeneity of Variance Check)
+# This uses the square root of the absolute standardized residuals
+ggplot(datum_clean, aes(x = fitted, y = sqrt(abs(std_resid)))) +
+  geom_point(alpha = 0.6) +
+  # Add the ideal flat reference line
+  geom_smooth(method = "loess", se = FALSE, color = "blue", linewidth = 0.5) + 
+  labs(
+    title = "Homogeneity of Variance Check: Scale-Location Plot",
+    x = "Fitted Values",
+    y = expression(sqrt(abs("Standardized Residuals")))
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10))
+
+#D. Histogram of residuals
+# Calculate mean and standard deviation of residuals for the density curve
+resid_mean <- mean(datum_clean$std_resid, na.rm = TRUE)
+resid_sd <- sd(datum_clean$std_resid, na.rm = TRUE)
+
+ggplot(datum_clean, aes(x = std_resid)) +
+  # 1. Create the Histogram (using density scale)
+  geom_histogram(aes(y = after_stat(density)), 
+                 bins = 15, # Adjust bin count for best visualization
+                 color = "black", 
+                 fill = "lightblue") +
+  
+  # 2. Overlay the Density of the Residuals (Green Line)
+  geom_density(color = "darkgreen", linewidth = 1) +
+  
+  # 3. Overlay the Theoretical Normal Density Curve (Red Dashed Line)
+  stat_function(fun = dnorm, 
+                args = list(mean = resid_mean, sd = resid_sd), 
+                color = "red", 
+                linewidth = 1,
+                linetype = "dashed") +
+  
+  labs(
+    title = "Residual Normality Check: Histogram with Density Curve",
+    x = "Standardized Residuals (Z-Scores)",
+    y = "Density"
+  ) +
+  theme_minimal()
+```
+
+**Conclusion**: Residuals look better after removal of the outlier. However, the stats do not really change. Both interactions have smaller p-values after removing the outlier, so the outlier is not driving significance.
+
+**Next Steps**: Keep the outlier in and report those results. Also, so those results for post hoc. Can say we ran it both ways and the interactions had smaller p-values after outlier removal.
+
+```{r}
+# 1. Since there are two 2-way interactions, we will subset all males to look at time points effect on ketones
+datumlongMale = datumlong2 %>%
+  filter(SexF == "M")
+
+resultsmale = lmer(Ketones ~ TimepointF + (1|ID),
+               data = datumlongMale, na.action = na.omit)
+summary(resultsmale)
+Anova(resultsmale, type = "III")
+
+# 2. Since there are two 2-way interactions, we will subset all females to look at time points effect on ketones
+datumlongFemale = datumlong2 %>%
+  filter(SexF == "F")
+resultsfemale = lmer(Ketones ~ TimepointF + (1|ID),
+               data = datumlongFemale, na.action = na.omit)
+summary(resultsfemale)
+Anova(resultsfemale, type = "III")
+
+# 3. Since there are two 2-way interactions, we will subset all treatments to look at time points effect on ketones
+datumlongHeat = datumlong2 %>%
+  filter(TreatmentF == "Heat")
+
+resultsheat = lmer(Ketones ~ TimepointF + (1|ID),
+               data = datumlongHeat, na.action = na.omit)
+summary(resultsheat)
+Anova(resultsheat, type = "III")
+
+# 2. Since there are two 2-way interactions, we will subset all females to look at time points effect on ketones
+datumlongControl = datumlong2 %>%
+  filter(TreatmentF == "Control")
+resultscontrol = lmer(Ketones ~ TimepointF + (1|ID),
+               data = datumlongControl, na.action = na.omit)
+summary(resultscontrol)
+Anova(resultscontrol, type = "III")
+
+```
+
+```{r}
+#Post Hoc Testing
+
+  #Test 1: Compare Timepoints (Pre vs. Post) separately for each Sex
+posthoc_Sex_Time = emmeans(results_final, ~ TimepointF * SexF)
+posthoc_Sex_Time1 = pairs(posthoc_Sex_Time, adjust = "sidak")
+print(posthoc_Sex_Time1)
+
+Sex_Time_output = cld(posthoc_Sex_Time,
+                  adjust = "sidak",   
+                  Letters = letters)
+
+print(Sex_Time_output)
+
+  #Test 2: Compare Timepoints (Pre vs. Post) separately for each Treatment
+posthoc_Treat_Time = emmeans(results_final, ~ TimepointF * TreatmentF)
+posthoc_Treat_Time1 = pairs(posthoc_Treat_Time, adjust = "sidak")
+print(posthoc_Treat_Time1)
+
+Treat_Time_output = cld(posthoc_Treat_Time,
+                  adjust = "sidak",   
+                  Letters = letters)
+
+print(Treat_Time_output)
+
+```
+
+**What does this means?**
+
+For the Timepoint\*Sex interaction
+
+-   Males at the 'post' time point had higher ketone levels than males at the 'pre' time point
+-   Weirdly, 'pre' and 'post' females did not statistically differ from 'pre' or 'post' males
+
+For the Timepoint\*Treatment interaction
+
+-   Heated individuals had higher ketone levels at the 'post' time point compared to the 'pre' time point
+
+-   The 'post' heated time point also had higher ketone levels compared to controls at both 'pre' and 'post' timepoints
+
+# Analysis - Body Temperature and Ketone Correlation
+
+```{r}
+#Removing the outlier
+  #I ran the test with the outlier included and the assumptions were not met, so I decided to remove the outlier
+  #Since it only looks like there is one outlier, I decided to run the Grubbs test, which is good for single outliers
+grubbs.test(datum2$PostKetones)
+  #Making the new data frame
+datum3 = datum2[-51, ]
+
+
+#Analysis
+
+# 1. Run Pearson's Correlation Test for both heated and control groups
+pearson_result = cor.test(
+  x = datum2$PostKetones,    
+  y = datum2$AvgMaxTemp,    
+  method = "pearson"  
+)
+  # View the results
+print(pearson_result)
+
+
+# 2.  Run Pearson's Correlation Test heated group
+datumHeated = datum2 %>% 
+ filter(TreatmentF == "Heat")
+
+pearson_resultHeat = cor.test(
+  x = datumHeated$PostKetones,   
+  y = datumHeated$AvgMaxTemp,   
+  method = "pearson"  
+)
+  # View the results
+print(pearson_resultHeat)
+
+ggplot(data=datumHeated, aes(AvgFinalTemp, PostKetones)) + 
+  geom_point()
+
+
+# 2.  Run Pearson's Correlation Test control group
+datumControl = datum2 %>% 
+ filter(TreatmentF == "Control")
+
+pearson_resultControl = cor.test(
+  x = datumControl$PostKetones,    
+  y = datumControl$AvgMaxTemp,    
+  method = "pearson"  
+)
+  # View the results
+print(pearson_resultControl)
+```
+
+# Manuscript Graph
+
+Graph depicting treatments impact on ketones
+
+```{r}
+
+# 1. Add the means and 95% CIs to the dataframe for the variables we are interested in 
+
+datumlong2_with_summary = datumlong2 %>%
+  
+  # 1. Group the data by the interaction terms
+  group_by(TreatmentF, TimepointF) %>%
+  
+  # 2. Calculate the group-level statistics (Mean, CI, etc.)
+  mutate(
+    N_group = n(),   
+    Mean_Ketones = mean(Ketones, na.rm = TRUE),
+    SD_Ketones = sd(Ketones, na.rm = TRUE),
+    SE_Ketones = SD_Ketones / sqrt(N_group),
+    CI_Margin_Ketones = 1.96 * SE_Ketones,
+    CI_Upper_Group = Mean_Ketones + CI_Margin_Ketones,
+    CI_Lower_Group = Mean_Ketones - CI_Margin_Ketones
+  ) %>%
+  ungroup()
+  #View the dataframe that was created 
+head(datumlong2_with_summary)
+
+
+# 2. Cleaning up data frame before plotting
+  # Define the consistent dodge width and rename the data frame for plotting
+DODGE_WIDTH = 0.4 
+plot_data = datumlong2_with_summary 
+
+  #Order the time points so that Pre and Post are graphed in the correct order on the plot
+plot_data$TreatmentF = as.factor(plot_data$TreatmentF)
+plot_data$TimepointF = factor(plot_data$TimepointF, levels = c("Pre", "Post")) 
+
+# 3. Plotting the graph
+
+plot = ggplot(data = plot_data, aes(x = TimepointF, y = Ketones, color = TreatmentF)) + 
+  geom_jitter(
+    size = 3.5,
+    alpha = 0.5,
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = DODGE_WIDTH) 
+  ) +
+  
+  geom_point(
+    aes(y = Mean_Ketones, group = TreatmentF),
+    size = 7.5, 
+    stroke = 1,
+    color = "black", 
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  geom_errorbar(
+    aes(ymin = CI_Lower_Group, ymax = CI_Upper_Group, group = TreatmentF),
+    width = 0.2,
+    linewidth = 1,
+    color = "black",
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+
+  geom_line(
+    aes(y = Mean_Ketones, group = TreatmentF),
+    linewidth = 1.5,
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "Control" = "#AAB8C2",         
+      "Heat" = "firebrick4"     
+    )
+  ) +
+  
+  labs(
+    x = "Time Point",
+    y = "Ketone (mmol/L)",
+    color = "Treatment Group"
+  ) +  
+  
+  ylim(0,1.4) +
+  
+  theme_classic() +
+  
+    theme(
+    axis.title = element_text(face = "bold", size = 30),
+    axis.text = element_text(size = 25),
+    legend.justification = c(0.5, 0.5),
+    legend.title = element_text(size = 28),
+    legend.text = element_text(size = 25),
+    strip.text = element_text(size = 20),
+    panel.background = element_rect(fill = "transparent", color = NA), 
+    plot.background = element_rect(fill = "transparent", color = NA),  
+    legend.background = element_rect(fill = "transparent", color = NA), 
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    axis.line = element_line(linewidth = 1.5, colour = "black")
+  ) 
+
+
+
+# 4. Adding signifigance and sample size
+plot1 =
+plot +
+  annotate(
+    "text", 
+    x = c(.9, 1.1, 1.9, 2.1), 
+    y = c(.7 + .2
+          , .7 + .2, .95 + .2, 1.2 + .2), 
+    label = c("a", "a", "a", "b"),  
+    size = 10,
+    color = "black") +
+   
+   # Add a new layer for the sample sizes
+  annotate(
+    "text",
+    x = c(.9, 1.1, 1.9, 2.1),
+    # Adjust the y-coordinates to be slightly lower
+     y = c(.7 + .1, .7 + .1, .95 + .1, 1.2 + .1), 
+    # Add your sample sizes here
+    label = c("(37)", "(43)", "(35)", "(34)"), 
+    size = 7.5, # Make the font size slightly smaller
+    color = "black")
+
+# 5. Save the graph
+ggsave(
+  filename = "KetonePlot1.png", 
+  plot = plot1,                       
+  width = 11.04,                              
+  height = 6.49,  
+  units = "in",
+  dpi = 300,
+  bg = "transparent"
+)
+```
+
+# Manuscript Graph - With Sex
+
+```{r}
+# 1. Add the means and 95% CIs to the dataframe for the variables we are interested in 
+
+datumlong2_with_summary = datumlong2 %>%
+  
+  # 1. Group the data by the interaction terms
+  group_by(TreatmentF, TimepointF) %>%
+  
+  # 2. Calculate the group-level statistics (Mean, CI, etc.)
+  mutate(
+    N_group = n(),   
+    Mean_Ketones = mean(Ketones, na.rm = TRUE),
+    SD_Ketones = sd(Ketones, na.rm = TRUE),
+    SE_Ketones = SD_Ketones / sqrt(N_group),
+    CI_Margin_Ketones = 1.96 * SE_Ketones,
+    CI_Upper_Group = Mean_Ketones + CI_Margin_Ketones,
+    CI_Lower_Group = Mean_Ketones - CI_Margin_Ketones
+  ) %>%
+  ungroup()
+  #View the dataframe that was created 
+head(datumlong2_with_summary)
+
+
+# 2. Cleaning up data frame before plotting
+  # Define the consistent dodge width and rename the data frame for plotting
+DODGE_WIDTH = 0.4 
+plot_data = datumlong2_with_summary 
+
+  #Order the time points so that Pre and Post are graphed in the correct order on the plot
+plot_data$TreatmentF = as.factor(plot_data$TreatmentF)
+plot_data$TimepointF = factor(plot_data$TimepointF, levels = c("Pre", "Post")) 
+
+# 3. Plotting the graph
+
+plot = ggplot(data = plot_data, aes(x = TimepointF, y = Ketones, color = TreatmentF)) + 
+ 
+  geom_jitter(
+    aes(shape = SexF, group = TreatmentF), 
+    size = 3.5,
+    alpha = 0.5,
+    position = position_jitterdodge(
+    jitter.width = 0.2, 
+    dodge.width = DODGE_WIDTH
+  ) 
+) +
+  
+  geom_point(
+    aes(y = Mean_Ketones, group = TreatmentF),
+    size = 7.5, 
+    shape = 18,
+    stroke = 1,
+    color = "black", 
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  geom_errorbar(
+    aes(ymin = CI_Lower_Group, ymax = CI_Upper_Group, group = TreatmentF),
+    width = 0.2,
+    linewidth = 1,
+    color = "black",
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+
+  geom_line(
+    aes(y = Mean_Ketones, group = TreatmentF),
+    linewidth = 1.5,
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "Control" = "#AAB8C2",         
+      "Heat" = "firebrick4"     
+    )
+  ) +
+  
+  labs(
+    x = "Time Point",
+    y = "Ketone (mmol/L)",
+    color = "Treatment Group"
+  ) +  
+  
+  guides(shape = "none") + 
+  
+  ylim(0,1.4) +
+  
+  theme_classic() +
+  
+    theme(
+    axis.title = element_text(face = "bold", size = 30),
+    axis.text = element_text(size = 25),
+    legend.justification = c(0.5, 0.5),
+    legend.title = element_text(size = 28),
+    legend.text = element_text(size = 25),
+    strip.text = element_text(size = 20),
+    panel.background = element_rect(fill = "transparent", color = NA), 
+    plot.background = element_rect(fill = "transparent", color = NA),  
+    legend.background = element_rect(fill = "transparent", color = NA), 
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    axis.line = element_line(linewidth = 1.5, colour = "black")
+  ) 
+
+
+
+# 4. Adding signifigance and sample size
+plot1 =
+plot +
+  annotate(
+    "text", 
+    x = c(.9, 1.1, 1.9, 2.1), 
+    y = c(.7 + .2
+          , .7 + .2, .95 + .2, 1.2 + .2), 
+    label = c("a", "a", "a", "b"),  
+    size = 10,
+    color = "black") +
+   
+   # Add a new layer for the sample sizes
+  annotate(
+    "text",
+    x = c(.9, 1.1, 1.9, 2.1),
+    # Adjust the y-coordinates to be slightly lower
+     y = c(.7 + .1, .7 + .1, .95 + .1, 1.2 + .1), 
+    # Add your sample sizes here
+    label = c("(37)", "(43)", "(36)", "(35)"), 
+    size = 7.5, # Make the font size slightly smaller
+    color = "black")
+
+# 5. Save the graph
+ggsave(
+  filename = "KetonePlotSex.png", 
+  plot = plot1,                       
+  width = 11.04,                              
+  height = 6.49,  
+  units = "in",
+  dpi = 300,
+  bg = "transparent"
+)
+```
+
+# Manuscript Graph - Sex and time point interaction
+
+```{r}
+# 1. Add the means and 95% CIs to the dataframe for the variables we are interested in 
+
+datumlong2_with_summary = datumlong2 %>%
+  
+  # 1. Group the data by the interaction terms
+  group_by(SexF, TimepointF) %>%
+  
+  # 2. Calculate the group-level statistics (Mean, CI, etc.)
+  mutate(
+    N_group = n(),   
+    Mean_Ketones = mean(Ketones, na.rm = TRUE),
+    SD_Ketones = sd(Ketones, na.rm = TRUE),
+    SE_Ketones = SD_Ketones / sqrt(N_group),
+    CI_Margin_Ketones = 1.96 * SE_Ketones,
+    CI_Upper_Group = Mean_Ketones + CI_Margin_Ketones,
+    CI_Lower_Group = Mean_Ketones - CI_Margin_Ketones
+  ) %>%
+  ungroup()
+  #View the dataframe that was created 
+head(datumlong2_with_summary)
+
+
+# 2. Cleaning up data frame before plotting
+  # Define the consistent dodge width and rename the data frame for plotting
+DODGE_WIDTH = 0.4 
+plot_data = datumlong2_with_summary 
+
+  #Order the time points so that Pre and Post are graphed in the correct order on the plot
+plot_data$SexF = as.factor(plot_data$SexF)
+plot_data$TimepointF = factor(plot_data$TimepointF, levels = c("Pre", "Post")) 
+
+# 3. Plotting the graph
+
+plot = ggplot(data = plot_data, aes(x = TimepointF, y = Ketones, color = SexF)) + 
+  geom_jitter(
+    size = 3.5,
+    alpha = 0.5,
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = DODGE_WIDTH) 
+  ) +
+  
+  geom_point(
+    aes(y = Mean_Ketones, group = SexF),
+    size = 7.5, 
+    stroke = 1,
+    color = "black", 
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  geom_errorbar(
+    aes(ymin = CI_Lower_Group, ymax = CI_Upper_Group, group = SexF),
+    width = 0.2,
+    linewidth = 1,
+    color = "black",
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+
+  geom_line(
+    aes(y = Mean_Ketones, group = SexF),
+    linewidth = 1.5,
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "F" = "grey82",         
+      "M" = "black"     
+    )
+  ) +
+  
+  labs(
+    x = "Time Point",
+    y = "Ketone (mmol/L)",
+    color = "Sex"
+  ) +  
+  theme_classic() +
+  
+  theme(
+    axis.title = element_text(face = "bold", size = 25),
+    axis.text = element_text(size = 22),
+    legend.justification = c(0.5, 0.5),
+    legend.title = element_text(size = 22),
+    legend.text = element_text(size = 20),
+    strip.text = element_text(size = 20),
+  ) 
+
+
+# 4. Adding signifigance and sample size
+plot1 = 
+plot +
+  annotate(
+    "text", 
+    x = c(.9, 1.1, 1.9, 2.1), 
+    y = c(.7 + .2, .7 + .2, .8 + .2, .95 + .2), 
+    label = c("ab", "a", "ab", "b"),  
+    size = 10,
+    color = "black") +
+   
+   # Add a new layer for the sample sizes
+  annotate(
+    "text",
+    x = c(.9, 1.1, 1.9, 2.1),
+    # Adjust the y-coordinates to be slightly lower
+     y = c(.7 + .1, .7 + .1, .8 + .1, .95 + .1), 
+    # Add your sample sizes here
+    label = c("(42)", "(38)", "(34)", "(35)"), 
+    size = 7.5, # Make the font size slightly smaller
+    color = "black")
+
+# 5. Save the graph
+ggsave(
+  filename = "KetonePlot2.png", 
+  plot = plot1,                       
+  width = 11.04,                              
+  height = 6.49,  
+  units = "in",
+  dpi = 300                               
+)
+
+
+
+```
+
+# Manuscript Graph - All Metabolites Combined
+
+```{r}
+# Glucose Graph
+
+# 1. Add the means and 95% CIs to the dataframe for the variables we are interested in 
+
+datumlong2_with_summary = datumlong2 %>%
+  
+  # 1. Group the data by the interaction terms
+  group_by(TreatmentF, TimepointF) %>%
+  
+  # 2. Calculate the group-level statistics (Mean, CI, etc.)
+  mutate(
+    N_group = n(),   
+    Mean_Glucose_Group = mean(Glucose, na.rm = TRUE),
+    SD_Glucose_Group = sd(Glucose, na.rm = TRUE),
+    SE_Glucose_Group = SD_Glucose_Group / sqrt(N_group),
+    CI_Margin_Glucose = 1.96 * SE_Glucose_Group,
+    CI_Upper_Group = Mean_Glucose_Group + CI_Margin_Glucose,
+    CI_Lower_Group = Mean_Glucose_Group - CI_Margin_Glucose
+  ) %>%
+  ungroup()
+  #View the dataframe that was created 
+head(datumlong2_with_summary)
+
+
+# 2. Cleaning up data frame before plotting
+  # Define the consistent dodge width and rename the data frame for plotting
+DODGE_WIDTH = 0.4 
+plot_data = datumlong2_with_summary 
+
+  #Order the time points so that Pre and Post are graphed in the correct order on the plot
+plot_data$TreatmentF = as.factor(plot_data$TreatmentF)
+plot_data$TimepointF = factor(plot_data$TimepointF, levels = c("Pre", "Post")) 
+
+# 3. Plotting the graph
+
+plot = ggplot(data = plot_data, aes(x = TimepointF, y = Glucose, color = TreatmentF)) + 
+  geom_jitter(
+    size = 3.5,
+    alpha = 0.5,
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = DODGE_WIDTH) 
+  ) +
+  
+  geom_point(
+    aes(y = Mean_Glucose_Group, group = TreatmentF),
+    size = 7.5, 
+    stroke = 1,
+    color = "black", 
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  geom_errorbar(
+    aes(ymin = CI_Lower_Group, ymax = CI_Upper_Group, group = TreatmentF),
+    width = 0.2,
+    linewidth = 1,
+    color = "black",
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+
+  geom_line(
+    aes(y = Mean_Glucose_Group, group = TreatmentF),
+    linewidth = 1.5,
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "Control" = "#AAB8C2",         
+      "Heat" = "firebrick4"     
+    )
+  ) +
+  
+  labs(
+    x = "Time Point",
+    y = "Blood Glucose (mg/dL)",
+    color = "Treatment Group"
+  ) +  
+  theme_classic() +
+  
+  theme(
+    axis.title = element_text(face = "bold", size = 30),
+    axis.text = element_text(size = 25),
+    legend.justification = c(0.5, 0.5),
+    legend.title = element_text(size = 28),
+    legend.text = element_text(size = 25),
+    strip.text = element_text(size = 20),
+    panel.background = element_rect(fill = "transparent", color = NA), 
+    plot.background = element_rect(fill = "transparent", color = NA),  
+    legend.background = element_rect(fill = "transparent", color = NA), 
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    axis.line = element_line(linewidth = 1.5, colour = "black")
+  ) 
+
+
+# 4. Adding signifigance and sample size
+
+plot1 =  plot +
+  annotate(
+    "text", 
+    x = c(.9, 1.1, 1.9, 2.1), 
+    y = c(379, 467, 370, 514), 
+    label = c("a", "a", "a", "b"),  
+    size = 10,
+    color = "black") +
+   
+   # Add a new layer for the sample sizes
+  annotate(
+    "text",
+    x = c(.9, 1.1, 1.9, 2.1),
+    # Adjust the y-coordinates to be slightly lower
+    y = c(379 - 35, 467 - 35, 370 - 35, 514 - 35), 
+    # Add your sample sizes here
+    label = c("(39)", "(36)", "(44)", "(36)"), 
+    size = 7.5, # Make the font size slightly smaller
+    color = "black")
+
+
+
+#Ketone Graph Sex by Time point
+
+# 1. Double-check your summary table math first
+plot3_summary = plot_data %>%
+  group_by(SexF, TimepointF) %>%
+  summarise(
+    Mean_Ketones = mean(Ketones, na.rm = TRUE),
+    SD_Ketones = sd(Ketones, na.rm = TRUE),
+    N = n(),
+    SE = SD_Ketones / sqrt(N),
+    CI_Lower = Mean_Ketones - (1.96 * SE),
+    CI_Upper = Mean_Ketones + (1.96 * SE),
+    .groups = "drop"
+  )
+DODGE_WIDTH = 0.6 
+
+plot3 = ggplot() +
+  # Individual data points
+  geom_jitter(
+    data = plot_data, 
+    aes(x = TimepointF, y = Ketones, color = SexF, group = SexF), # Map color to SexF
+    shape = 21, 
+    fill = "white", # Set fill to white (NOT mapped, so it stays white)
+    size = 3.5, 
+    stroke = 0.8, 
+    alpha = 0.4,
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = DODGE_WIDTH)
+  ) +
+  
+  geom_errorbar(
+    data = plot3_summary,
+    aes(x = TimepointF, ymin = CI_Lower, ymax = CI_Upper, group = SexF, color = SexF), # Map color here
+    width = 0.15, 
+    linewidth = 1,
+    position = position_dodge(width = DODGE_WIDTH)
+  ) +
+
+  geom_point(
+    data = plot3_summary,
+    aes(x = TimepointF, y = Mean_Ketones, group = SexF, color = SexF), # Map color here
+    shape = 21, 
+    fill = "white", 
+    size = 7.5, 
+    stroke = 2,
+    position = position_dodge(width = DODGE_WIDTH)
+  ) +
+
+  geom_line(
+    data = plot3_summary,
+    aes(x = TimepointF, y = Mean_Ketones, group = SexF, color = SexF), # Map color here
+    linewidth = 1.2,
+    position = position_dodge(width = DODGE_WIDTH)
+  ) +
+  
+  # THIS PART BRINGS THE COLOR BACK
+  scale_color_manual(
+    values = c(
+      "F" = "goldenrod4",  # Or your chosen color for Female
+      "M" = "black"    # Or your chosen color for Male
+    )
+  ) +
+  
+  # Ensure the legend title matches
+    labs(
+    x = "Time Point",
+    y = "Ketone (mmol/L)",
+    color = "Sex"
+  ) 
+
+
+# 4. Adding signifigance and sample size
+plot3 = 
+plot3 +
+  annotate(
+    "text", 
+    x = c(.85, 1.15, 1.85, 2.15), 
+    y = c(.7 + .2, .7 + .2, .8 + .2, .95 + .2), 
+    label = c("ab", "a", "ab", "b"),  
+    size = 10,
+    color = "black") +
+   
+   # Add a new layer for the sample sizes
+  annotate(
+    "text",
+    x = c(.85, 1.15, 1.85, 2.15),
+    # Adjust the y-coordinates to be slightly lower
+     y = c(.7 + .1, .7 + .1, .8 + .1, .95 + .1), 
+    # Add your sample sizes here
+    label = c("(42)", "(38)", "(34)", "(35)"), 
+    size = 7.5, # Make the font size slightly smaller
+    color = "black")
+
+
+# Ketone Graph Treatment by Time point
+
+
+# 1. Add the means and 95% CIs to the dataframe for the variables we are interested in 
+
+datumlong2_with_summary = datumlong2 %>%
+  
+  # 1. Group the data by the interaction terms
+  group_by(TreatmentF, TimepointF) %>%
+  
+  # 2. Calculate the group-level statistics (Mean, CI, etc.)
+  mutate(
+    N_group = n(),   
+    Mean_Ketones = mean(Ketones, na.rm = TRUE),
+    SD_Ketones = sd(Ketones, na.rm = TRUE),
+    SE_Ketones = SD_Ketones / sqrt(N_group),
+    CI_Margin_Ketones = 1.96 * SE_Ketones,
+    CI_Upper_Group = Mean_Ketones + CI_Margin_Ketones,
+    CI_Lower_Group = Mean_Ketones - CI_Margin_Ketones
+  ) %>%
+  ungroup()
+  #View the dataframe that was created 
+head(datumlong2_with_summary)
+
+
+# 2. Cleaning up data frame before plotting
+  # Define the consistent dodge width and rename the data frame for plotting
+DODGE_WIDTH = 0.6 
+plot_data = datumlong2_with_summary 
+
+  #Order the time points so that Pre and Post are graphed in the correct order on the plot
+plot_data$TreatmentF = as.factor(plot_data$TreatmentF)
+plot_data$TimepointF = factor(plot_data$TimepointF, levels = c("Pre", "Post")) 
+
+# 3. Plotting the graph
+
+plot = ggplot(data = plot_data, aes(x = TimepointF, y = Ketones, color = TreatmentF)) + 
+  geom_jitter(
+    size = 3.5,
+    alpha = 0.5,
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = DODGE_WIDTH) 
+  ) +
+  
+  geom_point(
+    aes(y = Mean_Ketones, group = TreatmentF),
+    size = 7.5, 
+    stroke = 1,
+    color = "black", 
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  geom_errorbar(
+    aes(ymin = CI_Lower_Group, ymax = CI_Upper_Group, group = TreatmentF),
+    width = 0.2,
+    linewidth = 1,
+    color = "black",
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+
+  geom_line(
+    aes(y = Mean_Ketones, group = TreatmentF),
+    linewidth = 1.5,
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "Control" = "#AAB8C2",         
+      "Heat" = "firebrick4"     
+    )
+  ) +
+  
+  labs(
+    x = "Time Point",
+    y = "Ketone (mmol/L)",
+    color = "Treatment Group"
+  ) +  
+  
+  theme_classic() +
+  
+    theme(
+    axis.title = element_text(face = "bold", size = 30),
+    axis.text = element_text(size = 25),
+    legend.justification = c(0.5, 0.5),
+    legend.title = element_text(size = 28),
+    legend.text = element_text(size = 25),
+    strip.text = element_text(size = 20),
+    panel.background = element_rect(fill = "transparent", color = NA), 
+    plot.background = element_rect(fill = "transparent", color = NA),  
+    legend.background = element_rect(fill = "transparent", color = NA), 
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    axis.line = element_line(linewidth = 1.5, colour = "black")
+  ) 
+
+
+
+# 4. Adding signifigance and sample size
+plot2 =
+plot +
+  annotate(
+    "text", 
+    x = c(.85, 1.15, 1.85, 2.15), 
+    y = c(.7 + .2, .7 + .2, .95 + .2, 1.2 + .2), 
+    label = c("a", "a", "a", "b"),  
+    size = 10,
+    color = "black") +
+   
+   # Add a new layer for the sample sizes
+  annotate(
+    "text",
+    x = c(.85, 1.15, 1.85, 2.15),
+    # Adjust the y-coordinates to be slightly lower
+     y = c(.7 + .1, .7 + .1, .95 + .1, 1.2 + .1), 
+    # Add your sample sizes here
+    label = c("(37)", "(43)", "(35)", "(34)"), 
+    size = 7.5, # Make the font size slightly smaller
+    color = "black")
+
+
+#Combining Plots
+
+# 1. Define a shared theme object
+my_shared_theme <- theme_classic() + 
+  theme(
+    axis.title = element_text(face = "bold", size = 18),
+    axis.text = element_text(size = 14),
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 14),
+    panel.background = element_rect(fill = "transparent", color = NA), 
+    plot.background = element_rect(fill = "transparent", color = NA),   
+    legend.background = element_rect(fill = "transparent", color = NA)
+  )
+
+# 2. Combine the plots
+
+# Ensure plot1, plot2, and plot3 are already created in your environment
+combined_plot = (plot1 | (plot2 / plot3)) + 
+  plot_layout(widths = c(1.5, 1), guides = 'collect')
+
+# Add the A, B, C tags 
+combined_with_tags = combined_plot + 
+  plot_annotation(tag_levels = 'A')
+
+# 3. Apply the shared theme to ALL plots using '&'
+final_plot = combined_with_tags & 
+  my_shared_theme + 
+  theme(
+    plot.tag = element_text(face = "bold", size = 25), 
+    plot.tag.position = "topleft"                   
+  )
+
+
+# 3. Save
+ggsave(
+  filename = "MetabolitesPlot.png", 
+  plot = final_plot,                                       
+  width = 16, height = 10, dpi = 300, bg = "transparent"
+)
+
+
+```

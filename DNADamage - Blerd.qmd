@@ -1,0 +1,611 @@
+---
+title: "DNA Damage - Blerd"
+author: "BDH"
+format: html
+editor: visual
+---
+
+## Data Set Up
+
+```{r}
+
+# 1.  
+library(tidyverse)
+library(car)
+library(gt)
+library(modelsummary)
+library(emmeans)
+library(modelbased)
+library(multcomp)
+library(ggpubr)
+library(cowplot)
+library(lme4)
+library(lmerTest)
+library(outliers)
+library(DHARMa)
+library(statmod)
+library(readr)
+library(dplyr)
+library(EnvStats)
+library(performance)
+library(see)
+library(patchwork)
+
+# 2. 
+setwd("/Users/ben/Desktop/Blerd/Data Analysis")
+
+# 3. Load your data
+datum = read.csv("Blerd.csv")
+datumlong = read.csv("BlerdData_long.csv")
+
+# 4. Ensure categorical variables are properly set
+datum$SexF = as.factor (datum$Sex)
+datum$TreatmentF = as.factor(datum$Treatment)
+datum$TimeF = as.factor(datum$Time)
+datum$IncubatorF = as.factor (datum$Incubator)
+datum$SideF = as.factor (datum$Side)
+datum$PostDamage = as.numeric (datum$PostDamage)
+datum$PreDamage = as.numeric (datum$PreDamage)
+
+datumlong$SexF = as.factor (datumlong$Sex)
+datumlong$TreatmentF = as.factor(datumlong$Treatment)
+datumlong$TimepointF = as.factor(datumlong$Timepoint)
+datumlong$Damage = as.numeric (datumlong$Damage)
+
+# 5. Subset data so there are no dead individuals included
+datum1 = datum %>%
+  filter(!Died %in% c("Died", "PIT.Death"))
+
+datumlong1 = datumlong %>%
+  filter(!Died %in% c("Died", "PIT.Death"))
+datumlong1 = datumlong1[-47, ]
+
+# 6. Take out any of the blank cells that cause problems when graphing
+datum2 = datum1 %>%
+  filter(PostDamage != "", PostDamage != "Dead", AvgMaxTemp != "", AvgMaxTemp != "Dead")
+datum2$TreatmentF = as.factor(datum2$Treatment)
+
+datumlong2 = datumlong1 %>%
+  filter(Damage != "", Damage != "Dead")
+```
+
+# Initial Data Viz
+
+```{r}
+# 1. Damage across timepoints and relationship to treatment and sex
+ggplot(datumlong2, aes(x = TimepointF, y = Damage, color = SexF, shape = TreatmentF)) +
+  geom_point(position = position_jitterdodge(
+      jitter.width = 0.2, 
+      dodge.width = 0.5 )) +
+  theme_classic() 
+
+# 2. Correlation between the average top 10% of body temperature values and post damage
+ggplot(datum2, aes(x = AvgMaxTemp, y = PostDamage, color = TreatmentF)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) + 
+  theme_classic()
+
+```
+
+# Summary Stats
+
+```{r}
+# 1. Averages for all variables of interest
+table = datumlong2 %>%
+  group_by(TreatmentF, TimepointF, SexF) %>%
+  summarise(
+    meanDamage = mean(Damage, na.rm = TRUE),
+    sdDamage = sd(Damage, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  )
+
+print(table)
+```
+
+# Analysis - Damage across time points
+
+```{r}
+
+# 1. Running the models
+
+  #Start with global linear mixed effects model to assess damage levels
+results = lmer(Damage ~ TreatmentF * SexF * TimepointF + (1|ID),
+               data = datumlong2, na.action = na.omit, REML = FALSE)
+summary(results)
+Anova(results, type = "III")
+
+# 2. The three way interaction was not significant, so it was removed and all two way interactions are included
+results2 = lmer(Damage ~ TreatmentF * SexF + TreatmentF * TimepointF +
+                  SexF * TimepointF + (1|ID), data = datumlong2, na.action = na.omit,              REML = FALSE)
+summary(results2)
+Anova(results2, type = "III")
+
+# 3. The Sex*Timepoint interaction was not significant, so it was removed from the model
+results3 = lmer(Damage ~ TreatmentF * SexF + TreatmentF * TimepointF +
+                  (1|ID), data = datumlong2, na.action = na.omit, REML = FALSE)
+summary(results3)
+Anova(results3, type = "III")
+
+# 4. The Treatment*Sex interaction was not significant, so it was removed from the model
+results4 = lmer(Damage ~ TreatmentF * TimepointF + SexF + (1|ID), data = datumlong2,
+                na.action = na.omit, REML = FALSE)
+summary(results4)
+Anova(results4, type = "III")
+
+# 5. The Treatment*Sex interaction was p=0.052 , so to ensure that is not significant, we will remove the interaction from the model and see if the AIC score improves
+results5 = lmer(Damage ~ TreatmentF + TimepointF + SexF + (1|ID), data = datumlong2,
+                na.action = na.omit, REML = FALSE)
+summary(results5)
+Anova(results5, type = "III")
+
+#Use AIC to test which one of these models has the best fit
+AIC(results, results2, results3, results4, results5)
+
+
+#According to AIC scores, use 'results4' for testing the assumptions
+
+results_final = lmer(Damage ~ TreatmentF * TimepointF + SexF + (1|ID), data = datumlong2,
+                na.action = na.omit, REML = TRUE)
+summary(results_final)
+Anova(results_final, type = "III")
+```
+
+```{r}
+#Assumptions of the model
+
+
+# 1. Check the VIF of this model
+vif(results_final)
+  #VIF = 1: No multicollinearity
+  #VIF between 1 and 5: Generally considered acceptable or moderate multicollinearity
+  #VIF > 5 (or > 10): Indicates potentially high multicollinearity
+
+# 2. Check other assumptions of a linear model
+
+# --- Extract Residuals and Fitted Values ---
+#1. Extract the data frame used by the model
+datum_clean = model.frame(results_final)
+
+# 2. Calculate and assign the fitted and residual values to this clean data frame
+datum_clean$fitted <- fitted(results_final)
+datum_clean$raw_resid <- residuals(results_final)
+datum_clean$std_resid <- datum_clean$raw_resid / sd(datum_clean$raw_resid, na.rm = TRUE)
+
+# 3. Use the studentized residuals method from the 'lme4' utility functions
+# Although 'rstandard' doesn't work, 'residuals' is robust.
+# If you really need a standardized residual, use this function:
+datum_clean$std_resid <- datum_clean$raw_resid / sd(datum_clean$raw_resid, na.rm = TRUE)
+
+
+# --- 2. Create the Plots ---
+
+# A. Linearity and Homoscedasticity Plot (Residuals vs. Fitted)
+ggplot(datum_clean, aes(x = fitted, y = std_resid)) +
+  geom_point(alpha = 0.6) +
+  # Add the ideal reference line at y=0
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  # Add a LOESS smoothing line (red line in performance)
+  geom_smooth(method = "loess", se = FALSE, color = "blue", linewidth = 0.5) + 
+  labs(
+    title = "Linearity Check: Standardized Residuals vs. Fitted Values",
+    x = "Fitted Values",
+    y = "Standardized Residuals"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10))
+
+# B. Normality Check (Quantile-Quantile Plot)
+ggplot(datum_clean, aes(sample = std_resid)) +
+  # Create the Q-Q plot
+  stat_qq() + 
+  # Add the reference line (the ideal normal distribution line)
+  stat_qq_line(color = "red") + 
+  labs(
+    title = "Normality Check: Q-Q Plot of Standardized Residuals",
+    x = "Theoretical Quantiles",
+    y = "Standardized Residuals"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10))
+
+# C. Scale-Location Plot (Homogeneity of Variance Check)
+# This uses the square root of the absolute standardized residuals
+ggplot(datum_clean, aes(x = fitted, y = sqrt(abs(std_resid)))) +
+  geom_point(alpha = 0.6) +
+  # Add the ideal flat reference line
+  geom_smooth(method = "loess", se = FALSE, color = "blue", linewidth = 0.5) + 
+  labs(
+    title = "Homogeneity of Variance Check: Scale-Location Plot",
+    x = "Fitted Values",
+    y = expression(sqrt(abs("Standardized Residuals")))
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10))
+
+#D. Histogram of residuals
+# Calculate mean and standard deviation of residuals for the density curve
+resid_mean <- mean(datum_clean$std_resid, na.rm = TRUE)
+resid_sd <- sd(datum_clean$std_resid, na.rm = TRUE)
+
+ggplot(datum_clean, aes(x = std_resid)) +
+  # 1. Create the Histogram (using density scale)
+  geom_histogram(aes(y = after_stat(density)), 
+                 bins = 15, # Adjust bin count for best visualization
+                 color = "black", 
+                 fill = "lightblue") +
+  
+  # 2. Overlay the Density of the Residuals (Green Line)
+  geom_density(color = "darkgreen", linewidth = 1) +
+  
+  # 3. Overlay the Theoretical Normal Density Curve (Red Dashed Line)
+  stat_function(fun = dnorm, 
+                args = list(mean = resid_mean, sd = resid_sd), 
+                color = "red", 
+                linewidth = 1,
+                linetype = "dashed") +
+  
+  labs(
+    title = "Residual Normality Check: Histogram with Density Curve",
+    x = "Standardized Residuals (Z-Scores)",
+    y = "Density"
+  ) +
+  theme_minimal()
+```
+
+**Conclusion:** Histogram looks good. Overall, this model is a good fit.
+
+**Next Steps:** Continue to post-hoc analysis.
+
+```{r}
+emms_interaction = emmeans(results_final, ~ TreatmentF * TimepointF)
+interaction_pairs = pairs(emms_interaction, adjust = "sidak")
+print(interaction_pairs)
+
+cld_output = cld(emms_interaction,
+                  adjust = "sidak",   
+                  Letters = letters)
+
+print(cld_output)
+
+```
+
+# Analysis - Damage across time % change
+
+```{r}
+
+# 1. Making the column
+
+datum2$DeltaDamage = datum2$PostDamage/datum2$PreDamage
+
+# 2. Running the models
+
+  #Start with global linear model to assess damage levels
+results = lm(DeltaDamage ~ TreatmentF * SexF, data = datum2, na.action = na.omit)
+summary(results)
+Anova(results, type = "III")
+
+  #The interaction was not significant, so it was removed from the model
+results2 = lm(DeltaDamage ~ TreatmentF + SexF, data = datum2, na.action = na.omit)
+summary(results2)
+Anova(results2, type = "III")
+
+  #Neither Sex nor Treatment affected the outcome, so each main effect was ran by itself
+results3 = lm(DeltaDamage ~ SexF, data = datum2, na.action = na.omit)
+summary(results3)
+Anova(results3, type = "III")
+
+  #Neither Sex nor Treatment affected the outcome, so each main effect was ran by itself
+results4 = lm(DeltaDamage ~ TreatmentF, data = datum2, na.action = na.omit)
+summary(results4)
+Anova(results4, type = "III")
+
+```
+
+The outcomes here are not any different than when we include time point, and so I would like to keep time point in the model.
+
+# Analysis - Body Temperature and Damage Correlation
+
+```{r}
+
+# 1. Run Pearson's Correlation Test for both heated and control groups
+pearson_result = cor.test(
+  x = datum2$PostDamage,    
+  y = datum2$AvgMaxTemp,    
+  method = "pearson"  
+)
+  # View the results
+print(pearson_result)
+
+
+# 2.  Run Pearson's Correlation Test heated group
+datumHeated = datum2 %>% 
+ filter(TreatmentF == "Heat")
+
+pearson_resultHeat = cor.test(
+  x = datumHeated$PostDamage,   
+  y = datumHeated$AvgMaxTemp,   
+  method = "pearson"  
+)
+  # View the results
+print(pearson_resultHeat)
+
+
+# 2.  Run Pearson's Correlation Test control group
+datumControl = datum2 %>% 
+ filter(TreatmentF == "Control")
+
+pearson_resultControl = cor.test(
+  x = datumControl$PostDamage,    
+  y = datumControl$AvgMaxTemp,    
+  method = "pearson"  
+)
+  # View the results
+print(pearson_resultControl)
+```
+
+Nothing was significant here, which makes sense based on previous models
+
+# Manuscript Graph
+
+```{r}
+# 1. Add the means and 95% CIs to the dataframe for the variables we are interested in 
+
+datumlong2_with_summary = datumlong2 %>%
+  
+  # 1. Group the data by the interaction terms
+  group_by(TreatmentF, TimepointF) %>%
+  
+  # 2. Calculate the group-level statistics (Mean, CI, etc.)
+  mutate(
+    N_group = n(),   
+    Mean_Damage_Group = mean(Damage, na.rm = TRUE),
+    SD_Damage_Group = sd(Damage, na.rm = TRUE),
+    SE_Damage_Group = SD_Damage_Group / sqrt(N_group),
+    CI_Margin_Damage = 1.96 * SE_Damage_Group,
+    CI_Upper_Group = Mean_Damage_Group + CI_Margin_Damage,
+    CI_Lower_Group = Mean_Damage_Group - CI_Margin_Damage
+  ) %>%
+  ungroup()
+  #View the dataframe that was created 
+head(datumlong2_with_summary)
+
+
+# 2. Cleaning up data frame before plotting
+  # Define the consistent dodge width and rename the data frame for plotting
+DODGE_WIDTH = 0.4 
+plot_data = datumlong2_with_summary 
+
+  #Order the time points so that Pre and Post are graphed in the correct order on the plot
+plot_data$TreatmentF = as.factor(plot_data$TreatmentF)
+plot_data$TimepointF = factor(plot_data$TimepointF, levels = c("Pre", "Post")) 
+
+# 3. Plotting the graph
+
+plot = ggplot(data = plot_data, aes(x = TimepointF, y = Damage, color = TreatmentF)) + 
+  geom_jitter(
+    size = 3.5,
+    alpha = 0.5,
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = DODGE_WIDTH) 
+  ) +
+  
+  geom_point(
+    aes(y = Mean_Damage_Group, group = TreatmentF),
+    size = 7.5, 
+    stroke = 1,
+    color = "black", 
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  geom_errorbar(
+    aes(ymin = CI_Lower_Group, ymax = CI_Upper_Group, group = TreatmentF),
+    width = 0.2,
+    linewidth = 1,
+    color = "black",
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+
+  geom_line(
+    aes(y = Mean_Damage_Group, group = TreatmentF),
+    linewidth = 1.5,
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "Control" = "#AAB8C2",         
+      "Heat" = "firebrick4"     
+    )
+  ) +
+  
+  labs(
+    x = "Time Point",
+    y = "DNA Damage (AU)",
+    color = "Treatment Group"
+  ) +  
+  theme_classic() +
+  
+  theme(
+    axis.title = element_text(face = "bold", size = 30),
+    axis.text = element_text(size = 25),
+    legend.justification = c(0.5, 0.5),
+    legend.title = element_text(size = 28),
+    legend.text = element_text(size = 25),
+    strip.text = element_text(size = 20),
+    panel.background = element_rect(fill = "transparent", color = NA), 
+    plot.background = element_rect(fill = "transparent", color = NA),  
+    legend.background = element_rect(fill = "transparent", color = NA), 
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    axis.line = element_line(linewidth = 1.5, colour = "black")
+  ) 
+
+# 4. Adding signifigance and sample size
+
+plot1 = plot +
+  annotate(
+    "text", 
+    x = c(.9, 1.1, 1.9, 2.1), 
+    y = c(2.1 + .3, 2.5 + .3, 3.1 + .3, 2 + .3), 
+    label = c("a", "a", "a", "a"),  
+    size = 10,
+    color = "black") +
+   
+   # Add a new layer for the sample sizes
+  annotate(
+    "text",
+    x = c(.9, 1.1, 1.9, 2.1),
+    # Adjust the y-coordinates to be slightly lower
+    y = c(2.1, 2.5, 3.1, 2), 
+    # Add your sample sizes here
+    label = c("(34)", "(42)", "(36)", "(35)"), 
+    size = 7.5, # Make the font size slightly smaller
+    color = "black")
+
+# 5. Save the graph
+ggsave(
+  filename = "DamagePlot.png", 
+  plot = plot1,                       
+  width = 11.04,                              
+  height = 6.49,  
+  units = "in",
+  dpi = 300,
+  bg = "transparent"
+)
+```
+
+# Manuscript Graph - With Sex
+
+```{r}
+# 1. Add the means and 95% CIs to the dataframe for the variables we are interested in 
+
+datumlong2_with_summary = datumlong2 %>%
+  
+  # 1. Group the data by the interaction terms
+  group_by(TreatmentF, TimepointF) %>%
+  
+  # 2. Calculate the group-level statistics (Mean, CI, etc.)
+  mutate(
+    N_group = n(),   
+    Mean_Damage_Group = mean(Damage, na.rm = TRUE),
+    SD_Damage_Group = sd(Damage, na.rm = TRUE),
+    SE_Damage_Group = SD_Damage_Group / sqrt(N_group),
+    CI_Margin_Damage = 1.96 * SE_Damage_Group,
+    CI_Upper_Group = Mean_Damage_Group + CI_Margin_Damage,
+    CI_Lower_Group = Mean_Damage_Group - CI_Margin_Damage
+  ) %>%
+  ungroup()
+  #View the dataframe that was created 
+head(datumlong2_with_summary)
+
+
+# 2. Cleaning up data frame before plotting
+  # Define the consistent dodge width and rename the data frame for plotting
+DODGE_WIDTH = 0.4 
+plot_data = datumlong2_with_summary 
+
+  #Order the time points so that Pre and Post are graphed in the correct order on the plot
+plot_data$TreatmentF = as.factor(plot_data$TreatmentF)
+plot_data$TimepointF = factor(plot_data$TimepointF, levels = c("Pre", "Post")) 
+
+# 3. Plotting the graph
+
+plot = ggplot(data = plot_data, aes(x = TimepointF, y = Damage, color = TreatmentF)) + 
+
+  geom_jitter(
+    aes(shape = SexF, group = TreatmentF), 
+    size = 3.5,
+    alpha = 0.5,
+    position = position_jitterdodge(
+      jitter.width = 0.2, 
+      dodge.width = DODGE_WIDTH
+  ) 
+) +
+  
+  geom_point(
+    aes(y = Mean_Damage_Group, group = TreatmentF),
+    size = 7.5, 
+    shape = 18,
+    stroke = 1,
+    color = "black", 
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  geom_errorbar(
+    aes(ymin = CI_Lower_Group, ymax = CI_Upper_Group, group = TreatmentF),
+    width = 0.2,
+    linewidth = 1,
+    color = "black",
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+
+  geom_line(
+    aes(y = Mean_Damage_Group, group = TreatmentF),
+    linewidth = 1.5,
+    position = position_dodge(width = DODGE_WIDTH) 
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "Control" = "#AAB8C2",         
+      "Heat" = "firebrick4"     
+    )
+  ) +
+  
+  labs(
+    x = "Time Point",
+    y = "DNA Damage (AU)",
+    color = "Treatment Group"
+  ) +  
+ 
+  guides(shape = "none") + 
+  
+  theme_classic() +
+  
+  
+  theme(
+    axis.title = element_text(face = "bold", size = 30),
+    axis.text = element_text(size = 25),
+    legend.justification = c(0.5, 0.5),
+    legend.title = element_text(size = 28),
+    legend.text = element_text(size = 25),
+    strip.text = element_text(size = 20),
+    panel.background = element_rect(fill = "transparent", color = NA), 
+    plot.background = element_rect(fill = "transparent", color = NA),  
+    legend.background = element_rect(fill = "transparent", color = NA), 
+    legend.box.background = element_rect(fill = "transparent", color = NA),
+    axis.line = element_line(linewidth = 1.5, colour = "black")
+  ) 
+
+# 4. Adding signifigance and sample size
+
+plot1 = plot +
+  annotate(
+    "text", 
+    x = c(.9, 1.1, 1.9, 2.1), 
+    y = c(2.1 + .3, 2.5 + .3, 3.1 + .3, 2 + .3), 
+    label = c("a", "a", "a", "a"),  
+    size = 10,
+    color = "black") +
+   
+   # Add a new layer for the sample sizes
+  annotate(
+    "text",
+    x = c(.9, 1.1, 1.9, 2.1),
+    # Adjust the y-coordinates to be slightly lower
+    y = c(2.1, 2.5, 3.1, 2), 
+    # Add your sample sizes here
+    label = c("(34)", "(42)", "(36)", "(35)"), 
+    size = 7.5, # Make the font size slightly smaller
+    color = "black")
+
+# 5. Save the graph
+ggsave(
+  filename = "DamagePlotSex.png", 
+  plot = plot1,                       
+  width = 11.04,                              
+  height = 6.49,  
+  units = "in",
+  dpi = 300,
+  bg = "transparent"
+)
+```
