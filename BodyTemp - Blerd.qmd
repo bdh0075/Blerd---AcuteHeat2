@@ -336,7 +336,7 @@ plot1 =  plot +
     x = c(1, 2), 
     y = c(45.6, 46.8), 
     # Add your sample sizes here
-    label = c("(26)", "(27)"), 
+    label = c("(27)", "(37)"), 
     size = 10, # Make the font size slightly smaller
     color = "black")
 
@@ -458,7 +458,7 @@ plot1 =  plot +
     x = c(1, 2), 
     y = c(45.6, 46.8), 
     # Add your sample sizes here
-    label = c("(26)", "(27)"), 
+    label = c("(27)", "(37)"), 
     size = 10, # Make the font size slightly smaller
     color = "black")
 
